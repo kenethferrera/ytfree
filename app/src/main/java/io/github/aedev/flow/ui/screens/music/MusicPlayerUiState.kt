@@ -8,6 +8,8 @@ import io.github.aedev.flow.data.lyrics.LyricsCandidate
 import io.github.aedev.flow.data.lyrics.LyricsEntry
 import io.github.aedev.flow.data.music.model.MusicTrack
 import io.github.aedev.flow.player.RepeatMode
+import io.github.aedev.flow.player.queue.PlaybackSourceInfo
+import io.github.aedev.flow.player.queue.QueueEntry
 
 data class MusicPlayerUiState(
     val currentTrack: MusicTrack? = null,
@@ -15,6 +17,9 @@ data class MusicPlayerUiState(
     val isBuffering: Boolean = false,
     val duration: Long = 0,
     val queue: List<MusicTrack> = emptyList(),
+    val queueEntries: List<QueueEntry> = emptyList(),
+    val playbackSource: PlaybackSourceInfo? = null,
+    val autoplayEnabled: Boolean = true,
     val autoplaySuggestions: List<MusicTrack> = emptyList(),
     val currentQueueIndex: Int = 0,
     val shuffleEnabled: Boolean = false,

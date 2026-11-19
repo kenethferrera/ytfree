@@ -1693,8 +1693,9 @@ class Media3MusicService : MediaLibraryService() {
     private fun startRadio(seedId: String) {
         automixJob?.cancel()
         radioTopUpJob?.cancel()
-        io.github.aedev.flow.player.EnhancedMusicPlayerManager
-            .setRadioLoading(true)
+        val manager = io.github.aedev.flow.player.EnhancedMusicPlayerManager
+        val targetSessionId = manager.queueCoordinator.session.value.sessionId
+        manager.setRadioLoading(true)
         automixJob =
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
@@ -1742,9 +1743,16 @@ class Media3MusicService : MediaLibraryService() {
                             MusicRadioPlanner.MAX_POOL_SIZE,
                         )
                     Log.d(TAG, "Radio seeded from $seedId: ${ranked.size} tracks, continuation=${radioContinuation != null}")
+
+                    val currentSessionId = manager.queueCoordinator.session.value.sessionId
+                    val autoplayActive = manager.autoplayEnabled.value
+                    if (currentSessionId != targetSessionId || !autoplayActive) {
+                        Log.d(TAG, "Radio seed discarded: session changed or autoplay disabled")
+                        return@launch
+                    }
+
                     if (ranked.isNotEmpty()) {
-                        io.github.aedev.flow.player.EnhancedMusicPlayerManager
-                            .updateAutomixItems(ranked)
+                        manager.updateAutomixItems(ranked)
                         // The queue may already be short (or ended) by the time the
                         // seed arrives — move pool tracks into it right away.
                         withContext(Dispatchers.Main) { maybeExtendRadio() }
@@ -1767,7 +1775,8 @@ class Media3MusicService : MediaLibraryService() {
      */
     private fun maybeExtendRadio() {
         val manager = io.github.aedev.flow.player.EnhancedMusicPlayerManager
-        if (!radioAutoplayEnabled && !manager.radioStationActive.value) return
+        val autoplayOn = (radioAutoplayEnabled || manager.radioStationActive.value) && manager.autoplayEnabled.value
+        if (!autoplayOn) return
         if (!::player.isInitialized) return
         // Repeat already produces an endless queue — matching desktop.
         if (player.repeatMode != Player.REPEAT_MODE_OFF) return
@@ -1792,11 +1801,11 @@ class Media3MusicService : MediaLibraryService() {
             radioResumeWhenAppended = true
             radioEndedItemCount = player.mediaItemCount
         }
-        batch.forEach { track ->
-            manager.addToQueue(track)
-            manager.removeAutomixItem(track.videoId)
-        }
         if (batch.isNotEmpty()) {
+            manager.appendAutoplayBatch(batch)
+            batch.forEach { track ->
+                manager.removeAutomixItem(track.videoId)
+            }
             // Our own growth must not read as a new queue on the next skip.
             lastQueueIds = manager.queue.value.map { videoSwitch.listenId(it.videoId) }
             Log.d(TAG, "Radio appended ${batch.size} tracks to the queue")
@@ -1809,12 +1818,12 @@ class Media3MusicService : MediaLibraryService() {
     /** Fetch the next radio page and APPEND it to the pool — never replaces. */
     private fun extendRadioPool() {
         if (radioTopUpJob?.isActive == true) return
-        io.github.aedev.flow.player.EnhancedMusicPlayerManager
-            .setRadioLoading(true)
+        val manager = io.github.aedev.flow.player.EnhancedMusicPlayerManager
+        val targetSessionId = manager.queueCoordinator.session.value.sessionId
+        manager.setRadioLoading(true)
         radioTopUpJob =
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
-                    val manager = io.github.aedev.flow.player.EnhancedMusicPlayerManager
                     val endpoint = radioEndpoint
                     val continuation = radioContinuation
                     val page =
@@ -1847,6 +1856,14 @@ class Media3MusicService : MediaLibraryService() {
                             MusicRadioPlanner.MAX_POOL_SIZE,
                         )
                     Log.d(TAG, "Radio pool topped up with ${ranked.size} tracks, continuation=${radioContinuation != null}")
+
+                    val currentSessionId = manager.queueCoordinator.session.value.sessionId
+                    val autoplayActive = manager.autoplayEnabled.value
+                    if (currentSessionId != targetSessionId || !autoplayActive) {
+                        Log.d(TAG, "Radio top-up discarded: session changed or autoplay disabled")
+                        return@launch
+                    }
+
                     if (ranked.isNotEmpty()) {
                         manager.appendAutomixItems(ranked)
                         // If the queue ended while this fetch was in flight, feed it

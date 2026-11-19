@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.rounded.Checklist
+import androidx.compose.material.icons.rounded.ClearAll
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Shuffle
@@ -40,6 +42,9 @@ internal fun QueueHeader(
     onShuffleQueue: () -> Unit,
     onCycleRepeat: () -> Unit,
     onSelect: () -> Unit,
+    onSaveQueue: (() -> Unit)? = null,
+    onClearUserQueue: (() -> Unit)? = null,
+    hasUserQueue: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val haptics = LocalHapticFeedback.current
@@ -63,6 +68,22 @@ internal fun QueueHeader(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        if (onSaveQueue != null) {
+            IconButton(onClick = onSaveQueue) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
+                    contentDescription = stringResource(R.string.save_queue_as_playlist),
+                )
+            }
+        }
+        if (hasUserQueue && onClearUserQueue != null) {
+            IconButton(onClick = onClearUserQueue) {
+                Icon(
+                    imageVector = Icons.Rounded.ClearAll,
+                    contentDescription = stringResource(R.string.clear_user_queue),
+                )
+            }
         }
         IconButton(onClick = onSelect) {
             Icon(Icons.Rounded.Checklist, contentDescription = stringResource(R.string.select_songs))

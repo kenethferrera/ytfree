@@ -24,6 +24,11 @@ import io.github.aedev.flow.data.music.model.MusicTrack
 import io.github.aedev.flow.player.error.PlayerDiagnostics
 import io.github.aedev.flow.player.musicvideo.MusicVideoItems
 import io.github.aedev.flow.player.musicvideo.MusicVideoPlanner
+import io.github.aedev.flow.player.queue.HybridMusicQueueCoordinator
+import io.github.aedev.flow.player.queue.PlaybackSession
+import io.github.aedev.flow.player.queue.PlaybackSourceInfo
+import io.github.aedev.flow.player.queue.QueueEntry
+import io.github.aedev.flow.player.queue.QueueSource
 import io.github.aedev.flow.service.Media3MusicService
 import io.github.aedev.flow.utils.await
 import kotlinx.coroutines.CancellationException
@@ -201,6 +206,13 @@ object EnhancedMusicPlayerManager {
     val seekEvent: SharedFlow<Unit> = _seekEvent.asSharedFlow()
 
     // Queue
+    val queueCoordinator = HybridMusicQueueCoordinator()
+    val queueEntries: StateFlow<List<QueueEntry>> = queueCoordinator.queueEntries
+    val playbackSource: StateFlow<PlaybackSourceInfo?> = queueCoordinator.playbackSource
+    val autoplayEnabled: StateFlow<Boolean> = queueCoordinator.autoplayEnabled
+
+    @Volatile
+    private var isRestoringQueue = false
 
     private val _queue = MutableStateFlow<List<MusicTrack>>(emptyList())
     val queue: StateFlow<List<MusicTrack>> = _queue.asStateFlow()
@@ -356,6 +368,7 @@ object EnhancedMusicPlayerManager {
                     queuePersistence?.startAutoSave {
                         val currentQ = _queue.value
                         if (currentQ.isNotEmpty()) {
+                            val currentSession = queueCoordinator.session.value
                             QueuePersistence.QueueState(
                                 queue = currentQ,
                                 currentIndex = _currentQueueIndex.value,
@@ -365,6 +378,11 @@ object EnhancedMusicPlayerManager {
                                 repeatMode = _repeatMode.value.savedCode,
                                 savedAt = System.currentTimeMillis(),
                                 automix = _automixItems.value,
+                                entries = currentSession.activeEntries,
+                                originalEntries = currentSession.originalEntries,
+                                sourceInfo = currentSession.source,
+                                history = currentSession.history,
+                                autoplayEnabled = currentSession.autoplayEnabled,
                             )
                         } else {
                             null
@@ -436,14 +454,19 @@ object EnhancedMusicPlayerManager {
                 }
 
                 override fun onRepeatModeChanged(repeatMode: Int) {
-                    _repeatMode.value = RepeatMode.fromPlayer(repeatMode)
+                    val mode = RepeatMode.fromPlayer(repeatMode)
+                    _repeatMode.value = mode
+                    queueCoordinator.setRepeatMode(mode)
                 }
 
                 // Every shuffle, from the app, the card, a headset or the car, lands here.
                 override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                    val turnedOn = shuffleModeEnabled && !_shuffleEnabled.value
                     _shuffleEnabled.value = shuffleModeEnabled
-                    if (turnedOn) shuffleQueue() else triggerQueueSave()
+                    if (!isRestoringQueue) {
+                        syncShuffleState(shuffleModeEnabled)
+                    } else {
+                        triggerQueueSave()
+                    }
                 }
 
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -459,6 +482,7 @@ object EnhancedMusicPlayerManager {
         mediaItem: MediaItem,
     ) {
         val trackId = mediaItem.mediaId
+        val entryId = mediaItem.queueEntryId
         val currentQ = _queue.value
         val queueIndex =
             MusicQueuePlanner.currentQueueIndex(
@@ -476,6 +500,7 @@ object EnhancedMusicPlayerManager {
                 }
             _currentTrack.value = track
             _currentQueueIndex.value = resolvedIndex.coerceAtLeast(0)
+            queueCoordinator.onMediaItemTransition(resolvedIndex.coerceAtLeast(0), trackId, entryId)
         } else {
             adoptPlayerQueue(controller)
         }
@@ -504,6 +529,12 @@ object EnhancedMusicPlayerManager {
         _queue.value = adopted
         _currentQueueIndex.value = index
         _currentTrack.value = adopted[index]
+        queueCoordinator.loadSource(
+            source = PlaybackSourceInfo(type = QueueSource.PLAYLIST, id = "external", title = "External"),
+            tracks = adopted,
+            startIndex = index,
+            startShuffled = false,
+        )
         triggerQueueSave()
     }
 
@@ -613,7 +644,8 @@ object EnhancedMusicPlayerManager {
         track: MusicTrack,
         uri: Uri = streamUri(track.videoId),
         useCacheKey: Boolean = !LocalMediaIds.isLocal(track.videoId),
-    ): MediaItem = musicMediaItem(track, uri, useCacheKey)
+        queueEntryId: String? = null,
+    ): MediaItem = musicMediaItem(track, uri, useCacheKey, queueEntryId = queueEntryId)
 
     private fun clearPendingPlayNext() {
         pendingPlayNextMediaId = null
@@ -738,12 +770,28 @@ object EnhancedMusicPlayerManager {
         _playerState.value = _playerState.value.copy(isPreparing = false)
 
         val activeQueue = if (queue.isNotEmpty()) queue else listOf(track)
-        _queue.value = activeQueue
+        val sourceType =
+            when {
+                sourceName?.contains("Album", ignoreCase = true) == true -> QueueSource.ALBUM
+                sourceName?.contains("Playlist", ignoreCase = true) == true -> QueueSource.PLAYLIST
+                activeQueue.size > 1 -> QueueSource.PLAYLIST
+                else -> QueueSource.SINGLE_TRACK
+            }
+        val sourceInfo =
+            PlaybackSourceInfo(
+                type = sourceType,
+                title = sourceName ?: track.title,
+            )
+        val startIdx = if (startIndex >= 0) startIndex else activeQueue.indexOfFirst { it.videoId == track.videoId }.coerceAtLeast(0)
+        queueCoordinator.loadSource(sourceInfo, activeQueue, startIdx, startShuffled = _shuffleEnabled.value)
+        _queue.value = queueCoordinator.queue.value
         _currentTrack.value = track
         sourceName?.let { _playingFrom.value = it }
 
+        val effectiveQueue = _queue.value
+        val effectiveEntries = queueCoordinator.queueEntries.value
         val mediaItems =
-            activeQueue.map { t ->
+            effectiveQueue.mapIndexed { i, t ->
                 val localUri = localUriOverrides[t.videoId]
                 val uri =
                     localUri ?: if (t.videoId == track.videoId && audioUrl.isNotEmpty() && !showsVideo(t.videoId)) {
@@ -752,10 +800,13 @@ object EnhancedMusicPlayerManager {
                         streamUri(t.videoId)
                     }
 
-                buildMediaItem(t, uri, useCacheKey = localUri == null && !LocalMediaIds.isLocal(t.videoId))
+                buildMediaItem(
+                    track = t,
+                    uri = uri,
+                    useCacheKey = localUri == null && !LocalMediaIds.isLocal(t.videoId),
+                    queueEntryId = effectiveEntries.getOrNull(i)?.id,
+                )
             }
-
-        val startIdx = if (startIndex >= 0) startIndex else activeQueue.indexOfFirst { it.videoId == track.videoId }.coerceAtLeast(0)
 
         playerItemFiles = localUriOverrides
         if (holdFrom != null) {
@@ -802,22 +853,19 @@ object EnhancedMusicPlayerManager {
     }
 
     /**
-     * Physically rearranges the queue: the playing track is pinned to the top and everything else
-     * is randomized. Applied as individual player moves so playback never restarts or rebuffers.
+     * Rearranges or restores the queue when shuffle changes:
+     * When enabled, remaining tracks are shuffled while keeping the playing track pinned and
+     * saving the original order snapshot.
+     * When disabled, the remaining tracks are restored to their original sequence order.
+     * Applied as individual player moves so playback never restarts or rebuffers.
      */
-    fun shuffleQueue() {
+    fun syncShuffleState(enabled: Boolean) {
         scope.launch {
-            val currentQ = _queue.value
-            if (currentQ.size < 2) return@launch
-            val currentIdx =
-                currentPlaybackQueueIndex().takeIf { it in currentQ.indices }
-                    ?: _currentQueueIndex.value.coerceIn(0, currentQ.size - 1)
-            val target =
-                buildList {
-                    add(currentQ[currentIdx])
-                    addAll(currentQ.filterIndexed { index, _ -> index != currentIdx }.shuffled())
-                }
+            queueCoordinator.setShuffle(enabled)
+            val target = queueCoordinator.queue.value
+            if (target.isEmpty()) return@launch
             _queue.value = target
+            _currentQueueIndex.value = queueCoordinator.currentQueueIndex.value
             clearPendingPlayNext()
             player?.let { p ->
                 if (p.mediaItemCount == target.size) {
@@ -837,6 +885,10 @@ object EnhancedMusicPlayerManager {
             }
             queueEdited()
         }
+    }
+
+    fun shuffleQueue() {
+        syncShuffleState(true)
     }
 
     fun updateAutomixItems(items: List<MusicTrack>) {
@@ -882,6 +934,7 @@ object EnhancedMusicPlayerManager {
     private fun triggerQueueSave() {
         val currentQ = _queue.value
         if (currentQ.isNotEmpty()) {
+            val currentSession = queueCoordinator.session.value
             queuePersistence?.saveQueueDebounced(
                 queue = currentQ,
                 currentIndex = _currentQueueIndex.value,
@@ -890,6 +943,11 @@ object EnhancedMusicPlayerManager {
                 shuffleEnabled = _shuffleEnabled.value,
                 repeatMode = _repeatMode.value.savedCode,
                 automix = _automixItems.value,
+                entries = currentSession.activeEntries,
+                originalEntries = currentSession.originalEntries,
+                sourceInfo = currentSession.source,
+                history = currentSession.history,
+                autoplayEnabled = currentSession.autoplayEnabled,
             )
         }
     }
@@ -898,9 +956,11 @@ object EnhancedMusicPlayerManager {
      * Restore queue from persistent storage
      */
     private suspend fun restoreSavedQueue() {
+        isRestoringQueue = true
         try {
             val starts = queueStarts
-            val restored = queuePersistence?.restoreQueue()?.let(::restoredMusicQueue) ?: return
+            val raw = queuePersistence?.restoreQueue() ?: return
+            val restored = restoredMusicQueue(raw) ?: return
             if (queueStarts != starts) {
                 Log.d("EnhancedMusicPlayer", "Saved queue skipped: a newer queue started while it was read")
                 return
@@ -916,13 +976,43 @@ object EnhancedMusicPlayerManager {
 
             // The service may have rearranged a resumed queue (a shuffle while the app was closed).
             val playerOrder = controller?.let { c -> List(c.mediaItemCount) { c.getMediaItemAt(it).mediaId } }
-            _queue.value =
+            val finalQueue =
                 playerOrder
                     ?.takeIf { resumedBySystem }
                     ?.let { order -> PlaylistQueueOrder.alignTo(restored.queue, order) { it.videoId } }
                     ?: restored.queue
+
+            _queue.value = finalQueue
             _currentQueueIndex.value = restored.index
             _automixItems.value = restored.automix
+
+            val source = raw.sourceInfo ?: PlaybackSourceInfo(QueueSource.PLAYLIST, id = "restored", title = "Restored")
+            val activeEntries =
+                if (raw.entries.isNotEmpty()) {
+                    raw.entries
+                } else {
+                    finalQueue.map { QueueEntry(track = it, source = source.type) }
+                }
+            val originalEntries =
+                if (raw.originalEntries.isNotEmpty()) {
+                    raw.originalEntries
+                } else {
+                    activeEntries
+                }
+
+            queueCoordinator.restoreSession(
+                PlaybackSession(
+                    source = source,
+                    activeEntries = activeEntries,
+                    originalEntries = originalEntries,
+                    currentIndex = restored.index.coerceIn(0, (activeEntries.size - 1).coerceAtLeast(0)),
+                    history = raw.history,
+                    shuffleEnabled = restored.shuffleEnabled,
+                    repeatMode = RepeatMode.fromCode(raw.repeatMode),
+                    autoplayEnabled = raw.autoplayEnabled,
+                ),
+            )
+
             // A queue the service resumed already carries its shuffle; otherwise it comes back with it.
             if (!resumedBySystem) applySavedShuffle(controller, restored.shuffleEnabled)
 
@@ -946,6 +1036,8 @@ object EnhancedMusicPlayerManager {
             }
         } catch (e: Exception) {
             Log.e("EnhancedMusicPlayer", "Failed to restore queue", e)
+        } finally {
+            isRestoringQueue = false
         }
     }
 
@@ -962,6 +1054,7 @@ object EnhancedMusicPlayerManager {
         queuePersistence?.cancelPendingSave()
         val currentQ = _queue.value
         if (currentQ.isNotEmpty()) {
+            val currentSession = queueCoordinator.session.value
             queuePersistence?.saveQueueImmediate(
                 queue = currentQ,
                 currentIndex = _currentQueueIndex.value,
@@ -970,6 +1063,11 @@ object EnhancedMusicPlayerManager {
                 shuffleEnabled = _shuffleEnabled.value,
                 repeatMode = _repeatMode.value.savedCode,
                 automix = _automixItems.value,
+                entries = currentSession.activeEntries,
+                originalEntries = currentSession.originalEntries,
+                sourceInfo = currentSession.source,
+                history = currentSession.history,
+                autoplayEnabled = currentSession.autoplayEnabled,
             )
         }
     }
@@ -996,28 +1094,16 @@ object EnhancedMusicPlayerManager {
     }
 
     fun playNext(track: MusicTrack) {
-        val currentQ = _queue.value.toMutableList()
-        val insertIdx =
-            MusicQueuePlanner.playNextInsertionIndex(
-                queueIds = currentQ.map { it.videoId },
-                playerIndex = player?.currentMediaItemIndex ?: MusicQueuePlanner.INDEX_UNSET,
-                currentTrackId = _currentTrack.value?.videoId,
-            )
-
-        currentQ.add(insertIdx, track)
-        _queue.value = currentQ
+        val insertIdx = queueCoordinator.playNext(track)
+        _queue.value = queueCoordinator.queue.value
+        val entry = queueCoordinator.queueEntries.value.getOrNull(insertIdx)
         pendingPlayNextMediaId = track.videoId
         pendingPlayNextMediaIndex = insertIdx
 
         player?.let { p ->
-            val playerInsertIdx =
-                when {
-                    p.currentMediaItemIndex in 0 until p.mediaItemCount -> p.currentMediaItemIndex + 1
-                    else -> insertIdx
-                }.coerceIn(0, p.mediaItemCount)
-
+            val playerInsertIdx = insertIdx.coerceIn(0, p.mediaItemCount)
             if (playerInsertIdx <= p.mediaItemCount) {
-                p.addMediaItem(playerInsertIdx, buildMediaItem(track))
+                p.addMediaItem(playerInsertIdx, buildMediaItem(track, queueEntryId = entry?.id))
                 pendingPlayNextMediaIndex = playerInsertIdx
             }
         }
@@ -1096,12 +1182,27 @@ object EnhancedMusicPlayerManager {
     }
 
     fun addToQueue(track: MusicTrack) {
-        val currentQ = _queue.value.toMutableList()
-        currentQ.add(track)
-        _queue.value = currentQ
+        val insertIdx = queueCoordinator.addToUserQueue(track)
+        _queue.value = queueCoordinator.queue.value
+        val entry = queueCoordinator.queueEntries.value.getOrNull(insertIdx)
 
         player?.let { p ->
-            p.addMediaItem(buildMediaItem(track))
+            val playerInsertIdx = insertIdx.coerceIn(0, p.mediaItemCount)
+            p.addMediaItem(playerInsertIdx, buildMediaItem(track, queueEntryId = entry?.id))
+        }
+
+        queueEdited()
+    }
+
+    fun appendAutoplayBatch(tracks: List<MusicTrack>) {
+        val newEntries = queueCoordinator.appendAutoplayBatch(tracks)
+        if (newEntries.isEmpty()) return
+        _queue.value = queueCoordinator.queue.value
+
+        player?.let { p ->
+            newEntries.forEach { entry ->
+                p.addMediaItem(buildMediaItem(entry.track, queueEntryId = entry.id))
+            }
         }
 
         queueEdited()
@@ -1548,6 +1649,7 @@ object EnhancedMusicPlayerManager {
             pendingPlayNextMediaIndex > index -> pendingPlayNextMediaIndex--
         }
         player?.let { p -> if (index < p.mediaItemCount) p.removeMediaItem(index) }
+        queueCoordinator.removeAt(index)
         queueEdited()
         return RemovedQueueTrack(removal.removedItem, index, removal.queue.items.map { it.videoId })
     }
@@ -1583,6 +1685,7 @@ object EnhancedMusicPlayerManager {
                     p.moveMediaItem(fromIndex, toIndex)
                 }
             }
+            queueCoordinator.move(fromIndex, toIndex)
             queueEdited()
         }
     }
@@ -1608,6 +1711,31 @@ object EnhancedMusicPlayerManager {
             queueEdited()
         }
     }
+
+    fun clearUserQueue() {
+        queueCoordinator.clearUserQueue()
+        val target = queueCoordinator.queue.value
+        _queue.value = target
+        _currentQueueIndex.value = queueCoordinator.currentQueueIndex.value
+        player?.let { p ->
+            val currentIdx = _currentQueueIndex.value
+            if (currentIdx in 0 until p.mediaItemCount) {
+                while (p.mediaItemCount > currentIdx + 1) {
+                    p.removeMediaItem(currentIdx + 1)
+                }
+                val remainingEntries = queueCoordinator.queueEntries.value.drop(currentIdx + 1)
+                remainingEntries.forEach { entry ->
+                    p.addMediaItem(buildMediaItem(entry.track, queueEntryId = entry.id))
+                }
+            }
+        }
+        queueEdited()
+    }
+
+    fun setAutoplayEnabled(enabled: Boolean) {
+        queueCoordinator.setAutoplayEnabled(enabled)
+        triggerQueueSave()
+    }
 }
 
 data class MusicPlayerState(
@@ -1628,18 +1756,3 @@ private const val HELD_SKIP_LIMIT_MS = 3_000L
 
 /** Longer than the service waits for a tail, so a new queue goes ahead even if the service never answers. */
 private const val QUEUE_HOLD_LIMIT_MS = 2_000L
-
-/** [savedCode] is how a saved queue writes the mode; [playerMode] is Media3's own value for it. */
-enum class RepeatMode(
-    val savedCode: Int,
-    val playerMode: Int,
-) {
-    OFF(0, Player.REPEAT_MODE_OFF),
-    ALL(1, Player.REPEAT_MODE_ALL),
-    ONE(2, Player.REPEAT_MODE_ONE),
-    ;
-
-    companion object {
-        fun fromPlayer(mode: Int): RepeatMode = entries.firstOrNull { it.playerMode == mode } ?: OFF
-    }
-}

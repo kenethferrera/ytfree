@@ -101,6 +101,7 @@ internal fun QueueTrackRow(
     modifier: Modifier = Modifier,
     onMenu: (() -> Unit)? = null,
     selected: Boolean? = null,
+    sourceBadge: String? = null,
 ) {
     val scope = rememberCoroutineScope()
     val dpad = LocalDpadNavigation.current
@@ -288,6 +289,15 @@ internal fun QueueTrackRow(
                                 text = "• " + formatTime(track.duration * 1000L),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                        if (sourceBadge != null) {
+                            Text(
+                                text = "• " + sourceBadge,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                fontWeight = FontWeight.Medium,
                                 maxLines = 1,
                             )
                         }

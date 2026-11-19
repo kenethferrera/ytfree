@@ -40,3 +40,4 @@ LibreTube-master/**  linguist-vendored
 Metrolist-main/**    linguist-vendored
 NewPipe-dev/**       linguist-vendored
 pipepipe/**          linguist-vendored
+graphify-out/graph.json merge=graphify

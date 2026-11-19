@@ -59,6 +59,8 @@ import androidx.compose.ui.unit.sp
 import io.github.aedev.flow.R
 import io.github.aedev.flow.data.music.model.MusicTrack
 import io.github.aedev.flow.player.RepeatMode
+import io.github.aedev.flow.player.queue.QueueEntry
+import io.github.aedev.flow.player.queue.QueueSource
 import io.github.aedev.flow.ui.components.layout.FlowBottomInsets
 import io.github.aedev.flow.ui.components.layout.LocalFlowBottomInsets
 import io.github.aedev.flow.ui.components.shared.FlowSelectionToolbar
@@ -83,6 +85,8 @@ internal class QueueActions(
     val onRemoveTracks: (List<Int>) -> Unit,
     val onDownloadTracks: (List<MusicTrack>) -> Unit,
     val onSaveTracks: (List<MusicTrack>) -> Unit,
+    val onSaveQueueAsPlaylist: ((String) -> Unit)? = null,
+    val onClearUserQueue: (() -> Unit)? = null,
 )
 
 /**
@@ -106,6 +110,7 @@ internal fun QueueList(
     clearNavigationBar: Boolean = true,
     selection: QueueSelection = remember { QueueSelection() },
     selectEntry: Boolean = false,
+    queueEntries: List<QueueEntry> = emptyList(),
 ) {
     val listState = rememberLazyListState()
     val haptics = LocalHapticFeedback.current
@@ -245,6 +250,17 @@ internal fun QueueList(
                         )
                         val isCurrent = index == currentIndex
                         val key = localKeys.getOrNull(index) ?: track.videoId
+                        val entry = queueEntries.getOrNull(index)
+                        val badge =
+                            if (!isCurrent && entry != null) {
+                                when {
+                                    entry.isUserAdded -> stringResource(R.string.user_queued_badge)
+                                    entry.source == QueueSource.AUTOPLAY -> stringResource(R.string.autoplay_badge)
+                                    else -> null
+                                }
+                            } else {
+                                null
+                            }
                         QueueTrackRow(
                             track = track,
                             isCurrent = isCurrent,
@@ -256,6 +272,7 @@ internal fun QueueList(
                             leftSwipe = swipes.left.rowSwipe,
                             rightSwipe = swipes.right.rowSwipe,
                             rowKey = localKeys.getOrNull(index) ?: track.videoId,
+                            sourceBadge = badge,
                             onClick = { if (selecting) selection.toggle(key) else actions.onTrackClick(index) },
                             onSwipe = { swipe -> onQueueSwipe(swipe, index) },
                             onMenu = if (isCurrent || selecting) null else ({ menuTarget = QueueMenuTarget(track, index, false) }),

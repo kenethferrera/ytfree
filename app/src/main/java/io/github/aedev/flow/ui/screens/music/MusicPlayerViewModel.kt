@@ -35,6 +35,7 @@ import io.github.aedev.flow.player.PlaybackTarget
 import io.github.aedev.flow.ui.components.music.sheet.resolveTrackArtists
 import io.github.aedev.flow.ui.components.musicplayer.queue.QueueSwipes
 import io.github.aedev.flow.utils.PerformanceDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -215,6 +216,24 @@ class MusicPlayerViewModel
             viewModelScope.launch {
                 EnhancedMusicPlayerManager.queue.collect { queue ->
                     _uiState.update { it.copy(queue = queue) }
+                }
+            }
+
+            viewModelScope.launch {
+                EnhancedMusicPlayerManager.queueEntries.collect { entries ->
+                    _uiState.update { it.copy(queueEntries = entries) }
+                }
+            }
+
+            viewModelScope.launch {
+                EnhancedMusicPlayerManager.playbackSource.collect { source ->
+                    _uiState.update { it.copy(playbackSource = source) }
+                }
+            }
+
+            viewModelScope.launch {
+                EnhancedMusicPlayerManager.autoplayEnabled.collect { enabled ->
+                    _uiState.update { it.copy(autoplayEnabled = enabled) }
                 }
             }
 
@@ -492,6 +511,35 @@ class MusicPlayerViewModel
         }
 
         fun setEndlessRadioEnabled(enabled: Boolean) = radioSwitch.set(enabled)
+
+        fun setAutoplayEnabled(enabled: Boolean) {
+            EnhancedMusicPlayerManager.setAutoplayEnabled(enabled)
+        }
+
+        fun clearUserQueue() {
+            EnhancedMusicPlayerManager.clearUserQueue()
+        }
+
+        fun saveQueueAsPlaylist(
+            name: String,
+            onComplete: (Boolean) -> Unit = {},
+        ) {
+            val tracks = _uiState.value.queue
+            if (tracks.isEmpty() || name.isBlank()) {
+                onComplete(false)
+                return
+            }
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val playlist = playlistRepository.createPlaylist(name.trim(), "Saved from queue")
+                    playlistRepository.updatePlaylist(playlist.copy(tracks = tracks))
+                    withContext(Dispatchers.Main) { onComplete(true) }
+                } catch (e: Exception) {
+                    android.util.Log.e("MusicPlayerVM", "Failed to save queue as playlist", e)
+                    withContext(Dispatchers.Main) { onComplete(false) }
+                }
+            }
+        }
 
         fun seekTo(position: Long) {
             val duration =

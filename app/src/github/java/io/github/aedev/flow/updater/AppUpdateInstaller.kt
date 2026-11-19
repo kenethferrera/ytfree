@@ -21,6 +21,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkRequest
 import androidx.work.workDataOf
 import dagger.hilt.android.qualifiers.ApplicationContext
+import io.github.aedev.flow.BuildConfig
 import io.github.aedev.flow.data.update.AppRelease
 import io.github.aedev.flow.data.update.InstallEvent
 import io.github.aedev.flow.data.update.InstallPhase
@@ -64,9 +65,10 @@ class AppUpdateInstaller
 
         @Volatile private var sessionCallback: PackageInstaller.SessionCallback? = null
 
-        val isAvailable: Boolean = true
+        val isAvailable: Boolean = BuildConfig.UPDATER_ENABLED
 
         fun download(release: AppRelease) {
+            if (!BuildConfig.UPDATER_ENABLED) return
             val apk = release.apk ?: return
             UpdateFiles.clean(context, keepVersion = null)
             val request =
@@ -117,7 +119,7 @@ class AppUpdateInstaller
                 }
             }
 
-        fun canInstall(): Boolean = context.packageManager.canRequestPackageInstalls()
+        fun canInstall(): Boolean = BuildConfig.UPDATER_ENABLED && context.packageManager.canRequestPackageInstalls()
 
         fun installPermissionIntent(): Intent =
             Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))

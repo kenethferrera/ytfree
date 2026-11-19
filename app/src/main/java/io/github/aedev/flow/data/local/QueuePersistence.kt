@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -14,6 +15,9 @@ import io.github.aedev.flow.data.music.model.MusicTrack
 import io.github.aedev.flow.data.music.model.withTypedArtists
 import io.github.aedev.flow.data.profile.ProfileFiles
 import io.github.aedev.flow.data.profile.StoreScope
+import io.github.aedev.flow.player.queue.PlaybackSourceInfo
+import io.github.aedev.flow.player.queue.QueueEntry
+import io.github.aedev.flow.player.queue.QueueSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,6 +51,11 @@ class QueuePersistence private constructor(
         private val REPEAT_MODE_KEY = intPreferencesKey("repeat_mode")
         private val SAVED_AT_KEY = longPreferencesKey("saved_at")
         private val AUTOMIX_KEY = stringPreferencesKey("automix_json")
+        private val ENTRIES_KEY = stringPreferencesKey("queue_entries_json")
+        private val ORIGINAL_ENTRIES_KEY = stringPreferencesKey("original_entries_json")
+        private val SESSION_SOURCE_KEY = stringPreferencesKey("session_source_json")
+        private val HISTORY_KEY = stringPreferencesKey("history_entries_json")
+        private val AUTOPLAY_ENABLED_KEY = booleanPreferencesKey("autoplay_enabled")
 
         @Volatile
         private var instance: QueuePersistence? = null
@@ -77,6 +86,11 @@ class QueuePersistence private constructor(
         val repeatMode: Int, // 0=OFF, 1=ALL, 2=ONE
         val savedAt: Long,
         val automix: List<MusicTrack> = emptyList(),
+        val entries: List<QueueEntry> = emptyList(),
+        val originalEntries: List<QueueEntry> = emptyList(),
+        val sourceInfo: PlaybackSourceInfo? = null,
+        val history: List<QueueEntry> = emptyList(),
+        val autoplayEnabled: Boolean = true,
     )
 
     /**
@@ -90,12 +104,30 @@ class QueuePersistence private constructor(
         shuffleEnabled: Boolean = false,
         repeatMode: Int = 0,
         automix: List<MusicTrack> = emptyList(),
+        entries: List<QueueEntry> = emptyList(),
+        originalEntries: List<QueueEntry> = emptyList(),
+        sourceInfo: PlaybackSourceInfo? = null,
+        history: List<QueueEntry> = emptyList(),
+        autoplayEnabled: Boolean = true,
     ) {
         saveJob?.cancel()
         saveJob =
             scope.launch {
                 delay(SAVE_DEBOUNCE_MS)
-                saveQueueImmediate(queue, currentIndex, currentPosition, currentTrackId, shuffleEnabled, repeatMode, automix)
+                saveQueueImmediate(
+                    queue = queue,
+                    currentIndex = currentIndex,
+                    currentPosition = currentPosition,
+                    currentTrackId = currentTrackId,
+                    shuffleEnabled = shuffleEnabled,
+                    repeatMode = repeatMode,
+                    automix = automix,
+                    entries = entries,
+                    originalEntries = originalEntries,
+                    sourceInfo = sourceInfo,
+                    history = history,
+                    autoplayEnabled = autoplayEnabled,
+                )
             }
     }
 
@@ -115,6 +147,11 @@ class QueuePersistence private constructor(
         shuffleEnabled: Boolean = false,
         repeatMode: Int = 0,
         automix: List<MusicTrack> = emptyList(),
+        entries: List<QueueEntry> = emptyList(),
+        originalEntries: List<QueueEntry> = emptyList(),
+        sourceInfo: PlaybackSourceInfo? = null,
+        history: List<QueueEntry> = emptyList(),
+        autoplayEnabled: Boolean = true,
     ) {
         if (queue.isEmpty()) return
 
@@ -130,6 +167,11 @@ class QueuePersistence private constructor(
                     prefs[REPEAT_MODE_KEY] = repeatMode
                     prefs[SAVED_AT_KEY] = now
                     prefs[AUTOMIX_KEY] = gson.toJson(automix)
+                    prefs[ENTRIES_KEY] = gson.toJson(entries)
+                    prefs[ORIGINAL_ENTRIES_KEY] = gson.toJson(originalEntries)
+                    prefs[SESSION_SOURCE_KEY] = gson.toJson(sourceInfo)
+                    prefs[HISTORY_KEY] = gson.toJson(history)
+                    prefs[AUTOPLAY_ENABLED_KEY] = autoplayEnabled
                 }
                 lastSaveTime = now
                 Log.d(TAG, "Queue saved: ${queue.size} tracks, index=$currentIndex, pos=$currentPosition, automix=${automix.size}")
@@ -161,6 +203,48 @@ class QueuePersistence private constructor(
                     emptyList()
                 }
 
+            val entryType = object : TypeToken<List<QueueEntry>>() {}.type
+            val entriesJson = prefs[ENTRIES_KEY]
+            val decodedEntries: List<QueueEntry> =
+                if (!entriesJson.isNullOrBlank()) {
+                    gson.fromJson<List<QueueEntry>>(entriesJson, entryType) ?: emptyList()
+                } else {
+                    emptyList()
+                }
+
+            val resolvedEntries =
+                if (decodedEntries.isNotEmpty()) {
+                    decodedEntries
+                } else {
+                    queue.map { QueueEntry(track = it, source = QueueSource.MANUAL_QUEUE) }
+                }
+
+            val originalEntriesJson = prefs[ORIGINAL_ENTRIES_KEY]
+            val resolvedOriginalEntries: List<QueueEntry> =
+                if (!originalEntriesJson.isNullOrBlank()) {
+                    gson.fromJson<List<QueueEntry>>(originalEntriesJson, entryType) ?: resolvedEntries
+                } else {
+                    resolvedEntries
+                }
+
+            val sourceJson = prefs[SESSION_SOURCE_KEY]
+            val resolvedSource: PlaybackSourceInfo? =
+                if (!sourceJson.isNullOrBlank()) {
+                    gson.fromJson(sourceJson, PlaybackSourceInfo::class.java)
+                } else {
+                    null
+                }
+
+            val historyJson = prefs[HISTORY_KEY]
+            val resolvedHistory: List<QueueEntry> =
+                if (!historyJson.isNullOrBlank()) {
+                    gson.fromJson<List<QueueEntry>>(historyJson, entryType) ?: emptyList()
+                } else {
+                    emptyList()
+                }
+
+            val autoplayEnabled = prefs[AUTOPLAY_ENABLED_KEY] ?: true
+
             val state =
                 QueueState(
                     queue = queue,
@@ -171,6 +255,11 @@ class QueuePersistence private constructor(
                     repeatMode = prefs[REPEAT_MODE_KEY] ?: 0,
                     savedAt = prefs[SAVED_AT_KEY] ?: 0L,
                     automix = automix,
+                    entries = resolvedEntries,
+                    originalEntries = resolvedOriginalEntries,
+                    sourceInfo = resolvedSource,
+                    history = resolvedHistory,
+                    autoplayEnabled = autoplayEnabled,
                 )
 
             Log.d(TAG, "Queue restored: ${queue.size} tracks, saved ${(System.currentTimeMillis() - state.savedAt) / 1000}s ago")
@@ -200,6 +289,11 @@ class QueuePersistence private constructor(
                                 shuffleEnabled = state.shuffleEnabled,
                                 repeatMode = state.repeatMode,
                                 automix = state.automix,
+                                entries = state.entries,
+                                originalEntries = state.originalEntries,
+                                sourceInfo = state.sourceInfo,
+                                history = state.history,
+                                autoplayEnabled = state.autoplayEnabled,
                             )
                         }
                     }

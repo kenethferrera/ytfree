@@ -75,11 +75,16 @@ class UpdateRepository
         val latest: StateFlow<AppRelease?> = _latest.asStateFlow()
 
         /** Asks GitHub now. Throws when the request fails, so a check the user started can say so. */
-        suspend fun fetch(): AppRelease? = mutex.withLock { fetchLocked() }
+        suspend fun fetch(): AppRelease? =
+            mutex.withLock {
+                if (!BuildConfig.UPDATER_ENABLED) return null
+                fetchLocked()
+            }
 
         /** For the launch page: the release this process already knows, or one fetch when it knows none. Null when it fails. */
         suspend fun releaseForLaunch(): AppRelease? =
             mutex.withLock {
+                if (!BuildConfig.UPDATER_ENABLED) return null
                 UpdateSchedule.releaseForLaunch(fetchedThisProcess, _latest.value) { runCatching { fetchLocked() }.getOrNull() }
             }
 
@@ -89,6 +94,7 @@ class UpdateRepository
          */
         suspend fun releaseToNotify(nowMs: Long = System.currentTimeMillis()): AppRelease? =
             mutex.withLock {
+                if (!BuildConfig.UPDATER_ENABLED) return null
                 if (!UpdateSchedule.isDue(dataManager.lastUpdateCheck.first(), nowMs)) return@withLock null
                 val release = runCatching { fetchLocked() }.getOrNull() ?: return@withLock null
                 if (!UpdateSchedule.mayAnnounce(

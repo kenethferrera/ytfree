@@ -153,6 +153,7 @@ internal fun NowPlayingSidePane(
                 actions = queueActions,
                 clearNavigationBar = false,
                 selectEntry = true,
+                queueEntries = uiState.queueEntries,
             )
         },
         lyrics = {
@@ -193,6 +194,7 @@ internal fun NowPlayingQueueSheet(
             swipes = queueSwipes,
             actions = queueActions,
             dragHandleModifier = dragHandleModifier,
+            queueEntries = uiState.queueEntries,
         )
     }
 }

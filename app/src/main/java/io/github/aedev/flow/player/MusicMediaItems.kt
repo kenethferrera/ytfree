@@ -18,6 +18,7 @@ internal fun musicMediaItem(
     uri: Uri,
     useCacheKey: Boolean = !LocalMediaIds.isLocal(track.videoId),
     fromVideoList: Boolean = false,
+    queueEntryId: String? = null,
 ): MediaItem {
     val builder =
         MediaItem
@@ -32,8 +33,12 @@ internal fun musicMediaItem(
                     .setAlbumTitle(track.album.takeIf(String::isNotBlank))
                     .setArtworkUri(AutoArtworkProvider.sessionArtworkUri(track.highResThumbnailUrl))
                     .setDurationMs(track.duration.takeIf { it > 0 }?.let { it * MILLIS_PER_SECOND })
-                    .apply { if (fromVideoList) setExtras(Bundle().apply { putBoolean(EXTRA_VIDEO_LIST_ITEM, true) }) }
-                    .build(),
+                    .apply {
+                        val extras = Bundle()
+                        if (fromVideoList) extras.putBoolean(EXTRA_VIDEO_LIST_ITEM, true)
+                        if (queueEntryId != null) extras.putString(EXTRA_QUEUE_ENTRY_ID, queueEntryId)
+                        if (!extras.isEmpty) setExtras(extras)
+                    }.build(),
             )
     if (useCacheKey) builder.setCustomCacheKey(track.videoId)
     return builder.build()
@@ -41,6 +46,10 @@ internal fun musicMediaItem(
 
 private const val MILLIS_PER_SECOND = 1000L
 private const val EXTRA_VIDEO_LIST_ITEM = "io.github.aedev.flow.VIDEO_LIST_ITEM"
+internal const val EXTRA_QUEUE_ENTRY_ID = "io.github.aedev.flow.QUEUE_ENTRY_ID"
+
+internal val MediaItem.queueEntryId: String?
+    get() = mediaMetadata.extras?.getString(EXTRA_QUEUE_ENTRY_ID)
 
 /**
  * A video picked from a video playlist or Watch later in the car (#1657). It plays as audio, but it is

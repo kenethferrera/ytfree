@@ -5357,4 +5357,10 @@
     <string name="ai_report_rate_limited">Too many reports sent, try again later</string>
     <string name="ai_report_rejected">AiSList rejected the report</string>
     <string name="ai_report_failed">Report failed, check your connection</string>
+    <string name="save_queue_as_playlist">Save queue as playlist</string>
+    <string name="save_queue_dialog_title">Save Queue as Playlist</string>
+    <string name="save_queue_name_hint">Playlist title</string>
+    <string name="user_queued_badge">User queue</string>
+    <string name="autoplay_badge">Autoplay</string>
+    <string name="clear_user_queue">Clear added songs</string>
 </resources>

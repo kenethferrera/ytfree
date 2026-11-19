@@ -42,6 +42,14 @@ internal fun rememberPlayerQueueActions(
             },
             onDownloadTracks = { viewModel.downloadTracks(it) },
             onSaveTracks = { sheets.saveTracks = it },
+            onSaveQueueAsPlaylist = { name ->
+                viewModel.saveQueueAsPlaylist(name) { success ->
+                    if (success) {
+                        quickActions.announce(resources.getString(R.string.toast_saved_playlist_to_music_library))
+                    }
+                }
+            },
+            onClearUserQueue = { viewModel.clearUserQueue() },
         )
     }
 }
